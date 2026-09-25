@@ -20,13 +20,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      # Gradle 7.4 / AGP 7.3.1 / Kotlin 1.5.31 predate JDK 21; 11 is what they target.
-      - uses: actions/setup-java@v4
+      # 17, not 11: the runner's sdkmanager is built for 17. Not 21: Gradle 7.4 cannot run on it.
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "11"
+          java-version: "17"
 
       - name: Install the SDK components the build pins
         run: |
