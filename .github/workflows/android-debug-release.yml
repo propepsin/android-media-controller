@@ -1,0 +1,81 @@
+# Builds the debug APK and publishes it as a GitHub Release asset rather than
+# an Actions artifact: artifact storage is metered per billing cycle and the
+# account has hit that ceiling, while release assets are repository storage.
+name: Android debug APK (Release)
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    name: assembleDebug -> Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      # 17, not 11: the runner's sdkmanager is built for 17. Not 21: Gradle 7.4 cannot run on it.
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install the SDK components the build pins
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SDKMANAGER" ] || SDKMANAGER=sdkmanager
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platforms;android-31" "build-tools;30.0.3"
+
+      - name: Assemble the debug APK
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Publish the APK as a release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          src=mediacontroller/build/outputs/apk/debug/mediacontroller-debug.apk
+          [ -f "$src" ] || { echo "no APK at $src" >&2; exit 1; }
+
+          sha="$(git rev-parse --short=7 HEAD)"
+          tag="debug-$GITHUB_RUN_NUMBER-$sha"
+          apk="media-controller-test-$sha.apk"
+          cp "$src" "$apk"
+
+          notes="Debug build of \`$GITHUB_REF_NAME\` at \`$sha\` ([run $GITHUB_RUN_NUMBER]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID))."
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$apk" --clobber
+          else
+            gh release create "$tag" "$apk" \
+              --target "$GITHUB_SHA" \
+              --title "Media Controller Test debug ($sha)" \
+              --notes "$notes" \
+              --prerelease
+          fi
+          echo "published $tag"
+
+      # After the upload, so a failed build never deletes a known-good APK.
+      - name: Keep only the three newest debug releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP: "3"
+        run: |
+          set -euo pipefail
+          stale="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq "[.[] | select(.tag_name | startswith(\"debug-\"))]
+                  | sort_by(.created_at) | reverse | .[$KEEP:] | .[].tag_name")"
+          [ -n "$stale" ] || { echo "nothing to prune"; exit 0; }
+          while read -r tag; do
+            [ -n "$tag" ] || continue
+            gh release delete "$tag" --cleanup-tag --yes
+          done <<< "$stale"
